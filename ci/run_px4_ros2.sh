@@ -7,6 +7,7 @@ export PX4_GZ_MODEL=x500
 export HEADLESS=1
 export QT_QPA_PLATFORM=offscreen
 export AMENT_TRACE_SETUP_FILES=0
+export AMENT_PYTHON_EXECUTABLE=/usr/bin/python3
 
 PX4_DIR=~/workspace/PX4-Autopilot
 ROS_WS=~/workspace/ros2_ws
