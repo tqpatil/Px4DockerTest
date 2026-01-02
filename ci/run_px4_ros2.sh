@@ -30,6 +30,7 @@ echo "Starting microxrce agent..."
 MicroXRCEAgent udp4 -p 8888 &
 DDS_PID=$!
 #start PX4 Simulation
+set +u
 echo "Starting PX4 Simulation..."
 cd "$PX4_DIR"
 source /opt/ros/humble/setup.bash
@@ -42,7 +43,7 @@ until ros2 topic list | tee /tmp/topics.txt | grep -q "/fmu/out/sensor_combined"
   sleep 2
 done
 '
-
+set -u
 timeout 10 ros2 topic echo /fmu/out/sensor_combined --once
 echo "Cleaning up..."
 kill -- -$$ || true
