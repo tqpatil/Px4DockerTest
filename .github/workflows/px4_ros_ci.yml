@@ -157,6 +157,7 @@ jobs:
           sleep 20
 
       - name: test ros topics
+        shell: bash
         run: |
           set +u
           source /opt/ros/humble/setup.bash
