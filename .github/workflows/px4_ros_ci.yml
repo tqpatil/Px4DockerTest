@@ -1,31 +1,53 @@
-name: PX4 ROS2 Integration CI
+name: px4 ros integration ci
+
 on:
   push:
   pull_request:
+
 jobs:
-  px4-ros2:
+  px4-ros:
     runs-on: ubuntu-22.04
     container:
-      image: ghcr.io/sloretz/ros:humble-desktop-full
+      image: osrf/ros:humble-desktop-full
 
     steps:
-      - name: Checkout repo
+      - name: checkout repo
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: install dependencies
         run: |
+          set -e
           apt-get update
           apt-get install -y \
             git \
             python3-pip \
             python-is-python3 \
+            build-essential \
+            cmake \
             ninja-build \
             protobuf-compiler \
             libeigen3-dev \
             libopencv-dev \
-            cmake \
-            build-essential
+            wget \
+            lsb-release \
+            gnupg \
+            sudo \
+            curl \
+            vim \
+            gdb \
+            valgrind \
+            astyle \
+            lcov \
+            libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav \
+            rsync \
+            && rm -rf /var/lib/apt/lists/*
 
+          pip3 install --no-cache-dir --upgrade pip
           pip3 install --no-cache-dir \
             kconfiglib \
             empy==3.3.4 \
@@ -35,21 +57,118 @@ jobs:
             jsonschema \
             future \
             pyyaml \
-            pyserial
-      - name: Clone PX4 and ROS dependencies
+            pyserial \
+            toml \
+            numpy \
+            pandas
+
+      - name: install micro xrce dds agent
         run: |
-          mkdir -p ~/workspace
-          cd ~/workspace
-          git clone -b release/1.14 https://github.com/PX4/PX4-Autopilot.git --recursive
+          set -e
+          cd /tmp
+          git clone https://github.com/eProsima/Micro-XRCE-DDS-Agent.git
+          cd Micro-XRCE-DDS-Agent
+          mkdir build && cd build
+          cmake ..
+          make -j$(nproc)
+          sudo make install
+          sudo ldconfig
+          cd / && rm -rf /tmp/Micro-XRCE-DDS-Agent
 
-          mkdir -p ros2_ws/src
-          cd ros2_ws/src
-          git clone -b release/1.14 https://github.com/PX4/px4_msgs.git --recursive
-          git clone -b release/v1.14 https://github.com/PX4/px4_ros_com.git --recursive
-      - name: Run PX4 and ROS integration test
+      - name: prepare workspace
         run: |
-          chmod +x ci/run_px4_ros2.sh
-          ci/run_px4_ros2.sh
+          set -e
+          WORKSPACE=~/workspace
+          PX4_DIR=$WORKSPACE/PX4-Autopilot
+          ROS_WS=$WORKSPACE/ros2_ws
 
+          mkdir -p $WORKSPACE
+          cd $WORKSPACE
 
+          if [ ! -d "$PX4_DIR" ]; then
+            git clone -b release/1.14 https://github.com/PX4/PX4-Autopilot.git --recursive
+          fi
 
+          mkdir -p $ROS_WS/src
+          cd $ROS_WS/src
+          if [ ! -d "px4_msgs" ]; then
+            git clone -b release/1.14 https://github.com/PX4/px4_msgs.git
+          fi
+          if [ ! -d "px4_ros_com" ]; then
+            git clone -b release/v1.14 https://github.com/PX4/px4_ros_com.git
+          fi
+
+          mkdir -p ~/scripts
+          cat > ~/scripts/build_px4.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          export PX4_SIM_SPEED_FACTOR=2
+          cd ~/workspace/PX4-Autopilot
+          make clean
+          HEADLESS=1 make px4_sitl gz_x500
+          EOF
+                    chmod +x ~/scripts/build_px4.sh
+
+                    cat > ~/scripts/build_ros2.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          set +u
+          source /opt/ros/humble/setup.bash
+          set -u
+          cd ~/workspace/ros2_ws
+          colcon build --symlink-install
+          set +u
+          source install/setup.bash
+          set -u
+          EOF
+                    chmod +x ~/scripts/build_ros2.sh
+
+                    cat > ~/scripts/run_simulation.sh << 'EOF'
+          #!/bin/bash
+          export PX4_SIM_SPEED_FACTOR=2
+          cd ~/workspace/PX4-Autopilot
+          HEADLESS=1 make px4_sitl gz_x500
+          EOF
+                    chmod +x ~/scripts/run_simulation.sh
+
+                    cat > ~/scripts/run_dds_agent.sh << 'EOF'
+          #!/bin/bash
+          MicroXRCEAgent udp4 -p 8888
+          EOF
+                    chmod +x ~/scripts/run_dds_agent.sh
+
+      - name: build px4
+        run: |
+          ~/scripts/build_px4.sh
+
+      - name: build ros
+        run: |
+          ~/scripts/build_ros2.sh
+
+      - name: start px4 and dds
+        run: |
+          ~/scripts/run_simulation.sh &
+          PX4_PID=$!
+          ~/scripts/run_dds_agent.sh &
+          DDS_PID=$!
+          echo $PX4_PID > /tmp/px4_pid.txt
+          echo $DDS_PID > /tmp/dds_pid.txt
+          sleep 20
+
+      - name: test ros topics
+        run: |
+          set +u
+          source /opt/ros/humble/setup.bash
+          source ~/workspace/ros2_ws/install/setup.bash
+          set -u
+          ros2 topic list | tee /tmp/topics.txt
+          if ! grep -q "/fmu/out/sensor_combined" /tmp/topics.txt; then
+            exit 1
+          fi
+          timeout 5 ros2 topic echo /fmu/out/sensor_combined --once
+
+      - name: stop px4 and dds
+        if: always()
+        run: |
+          kill $(cat /tmp/px4_pid.txt) || true
+          kill $(cat /tmp/dds_pid.txt) || true
