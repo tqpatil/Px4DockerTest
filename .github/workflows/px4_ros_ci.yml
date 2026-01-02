@@ -81,7 +81,6 @@ jobs:
           WORKSPACE=~/workspace
           PX4_DIR=$WORKSPACE/PX4-Autopilot
           ROS_WS=$WORKSPACE/ros2_ws
-
           mkdir -p $WORKSPACE
           cd $WORKSPACE
 
@@ -105,7 +104,8 @@ jobs:
           export PX4_SIM_SPEED_FACTOR=2
           cd ~/workspace/PX4-Autopilot
           make clean
-          HEADLESS=1 make px4_sitl gz_x500
+          export PX4_GZ_MODEL=x500
+          HEADLESS=1 make px4_sitl
           EOF
                     chmod +x ~/scripts/build_px4.sh
 
@@ -126,8 +126,9 @@ jobs:
                     cat > ~/scripts/run_simulation.sh << 'EOF'
           #!/bin/bash
           export PX4_SIM_SPEED_FACTOR=2
+          export PX4_GZ_MODEL=x500
           cd ~/workspace/PX4-Autopilot
-          HEADLESS=1 make px4_sitl gz_x500
+          HEADLESS=1 make px4_sitl
           EOF
                     chmod +x ~/scripts/run_simulation.sh
 
