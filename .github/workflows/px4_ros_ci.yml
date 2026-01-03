@@ -44,8 +44,7 @@ jobs:
             gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-ugly \
             gstreamer1.0-libav \
-            rsync \
-            && rm -rf /var/lib/apt/lists/*
+            rsync
 
           pip3 install --no-cache-dir --upgrade pip
           pip3 install --no-cache-dir \
@@ -62,6 +61,16 @@ jobs:
             numpy \
             pandas
 
+      - name: install gazebo garden
+        run: |
+          set -e
+          wget https://packages.osrfoundation.org/gazebo.gpg -O /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] \
+            http://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" \
+            | tee /etc/apt/sources.list.d/gazebo-stable.list > /dev/null
+          apt-get update
+          apt-get install -y gz-garden
+
       - name: install micro xrce dds agent
         run: |
           set -e
@@ -71,16 +80,17 @@ jobs:
           mkdir build && cd build
           cmake ..
           make -j$(nproc)
-          sudo make install
-          sudo ldconfig
+          make install
+          ldconfig
           cd / && rm -rf /tmp/Micro-XRCE-DDS-Agent
 
       - name: prepare workspace
         run: |
           set -e
-          WORKSPACE=~/workspace
+          WORKSPACE=$HOME/workspace
           PX4_DIR=$WORKSPACE/PX4-Autopilot
           ROS_WS=$WORKSPACE/ros2_ws
+
           mkdir -p $WORKSPACE
           cd $WORKSPACE
 
@@ -90,84 +100,93 @@ jobs:
 
           mkdir -p $ROS_WS/src
           cd $ROS_WS/src
+
           if [ ! -d "px4_msgs" ]; then
             git clone -b release/1.14 https://github.com/PX4/px4_msgs.git
           fi
+
           if [ ! -d "px4_ros_com" ]; then
             git clone -b release/v1.14 https://github.com/PX4/px4_ros_com.git
           fi
 
-          mkdir -p ~/scripts
-          cat > ~/scripts/build_px4.sh << 'EOF'
+          mkdir -p $HOME/scripts
+
+          cat > $HOME/scripts/build_px4.sh << 'EOF'
           #!/bin/bash
           set -e
+          source /usr/share/gazebo/setup.bash
           export PX4_SIM_SPEED_FACTOR=2
-          cd ~/workspace/PX4-Autopilot
+          export PX4_GZ_MODEL=x500
+          export GZ_SIM_RESOURCE_PATH=$HOME/workspace/PX4-Autopilot/Tools/simulation/gz/models
+          export GZ_SIM_SYSTEM_PLUGIN_PATH=$HOME/workspace/PX4-Autopilot/build/px4_sitl_default/build_gz-garden
+          cd $HOME/workspace/PX4-Autopilot
           make clean
-          export PX4_GZ_MODEL=x500
           HEADLESS=1 make px4_sitl
           EOF
-                    chmod +x ~/scripts/build_px4.sh
+          chmod +x $HOME/scripts/build_px4.sh
 
-                    cat > ~/scripts/build_ros2.sh << 'EOF'
+          cat > $HOME/scripts/build_ros2.sh << 'EOF'
           #!/bin/bash
           set -e
-          set +u
           source /opt/ros/humble/setup.bash
-          set -u
-          cd ~/workspace/ros2_ws
+          cd $HOME/workspace/ros2_ws
           colcon build --symlink-install
-          set +u
           source install/setup.bash
-          set -u
           EOF
-                    chmod +x ~/scripts/build_ros2.sh
+          chmod +x $HOME/scripts/build_ros2.sh
 
-                    cat > ~/scripts/run_simulation.sh << 'EOF'
-          #!/bin/bash
-          export PX4_SIM_SPEED_FACTOR=2
-          export PX4_GZ_MODEL=x500
-          cd ~/workspace/PX4-Autopilot
-          HEADLESS=1 make px4_sitl
-          EOF
-                    chmod +x ~/scripts/run_simulation.sh
-
-                    cat > ~/scripts/run_dds_agent.sh << 'EOF'
+          cat > $HOME/scripts/run_dds_agent.sh << 'EOF'
           #!/bin/bash
           MicroXRCEAgent udp4 -p 8888
           EOF
-                    chmod +x ~/scripts/run_dds_agent.sh
+          chmod +x $HOME/scripts/run_dds_agent.sh
+
+          cat > $HOME/scripts/run_simulation.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          source /usr/share/gazebo/setup.bash
+          export PX4_SIM_SPEED_FACTOR=2
+          export PX4_GZ_MODEL=x500
+          export PX4_UXRCE_DDS_NS=fmu
+          export PX4_UXRCE_DDS_PORT=8888
+          export GZ_SIM_RESOURCE_PATH=$HOME/workspace/PX4-Autopilot/Tools/simulation/gz/models
+          export GZ_SIM_SYSTEM_PLUGIN_PATH=$HOME/workspace/PX4-Autopilot/build/px4_sitl_default/build_gz-garden
+          cd $HOME/workspace/PX4-Autopilot
+          HEADLESS=1 make px4_sitl
+          EOF
+          chmod +x $HOME/scripts/run_simulation.sh
 
       - name: build px4
         run: |
-          ~/scripts/build_px4.sh
+          $HOME/scripts/build_px4.sh
 
       - name: build ros
         run: |
-          ~/scripts/build_ros2.sh
+          $HOME/scripts/build_ros2.sh
 
-      - name: start px4 and dds
+      - name: start dds and px4
         run: |
-          ~/scripts/run_simulation.sh &
-          PX4_PID=$!
-          ~/scripts/run_dds_agent.sh &
+          $HOME/scripts/run_dds_agent.sh &
           DDS_PID=$!
+          sleep 2
+          $HOME/scripts/run_simulation.sh &
+          PX4_PID=$!
           echo $PX4_PID > /tmp/px4_pid.txt
           echo $DDS_PID > /tmp/dds_pid.txt
-          sleep 20
 
       - name: test ros topics
         shell: bash
         run: |
-          set +u
           source /opt/ros/humble/setup.bash
-          source ~/workspace/ros2_ws/install/setup.bash
-          set -u
-          ros2 topic list | tee /tmp/topics.txt
-          if ! grep -q "/fmu/out/sensor_combined" /tmp/topics.txt; then
-            exit 1
-          fi
-          timeout 5 ros2 topic echo /fmu/out/sensor_combined --once
+          source $HOME/workspace/ros2_ws/install/setup.bash
+
+          timeout 30 bash -c '
+            until ros2 topic list | grep -q /fmu/out/sensor_combined; do
+              sleep 1
+            done
+          '
+
+          ros2 topic echo /fmu/out/sensor_combined --once
 
       - name: stop px4 and dds
         if: always()
