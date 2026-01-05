@@ -211,11 +211,40 @@ jobs:
       - name: start dds and px4
         run: |
           set -e
-          $HOME/scripts/run_dds_agent.sh || (cat $HOME/logs/microxrce_agent.log && false)
-          $HOME/scripts/run_simulation.sh || (tail -n +1 $HOME/logs/px4_gz.log && false)
-          sleep 5
-          echo "DDS PID: $(cat $HOME/.microxrce_agent.pid || echo 'N/A')"
-          echo "PX4 PID: $(cat /tmp/px4_pid.txt || echo 'N/A')"
+
+          # Start DDS agent with output logging
+          echo "Starting MicroXRCE-DDS Agent..."
+          $HOME/scripts/run_dds_agent.sh > /tmp/dds_agent.log 2>&1 &
+          DDS_PID=$!
+          echo $DDS_PID > /tmp/dds_pid.txt
+
+          # Verify DDS agent is running
+          sleep 2
+          if ! kill -0 $DDS_PID 2>/dev/null; then
+            echo "ERROR: DDS agent failed to start"
+            cat /tmp/dds_agent.log
+            exit 1
+          fi
+          echo "DDS agent started (PID: $DDS_PID)"
+
+          # Start PX4 simulation with output logging
+          echo "Starting PX4 SITL simulation..."
+          $HOME/scripts/run_simulation.sh > /tmp/px4_sim.log 2>&1 &
+          PX4_PID=$!
+          echo $PX4_PID > /tmp/px4_pid.txt
+
+          # Verify PX4 is running
+          sleep 2
+          if ! kill -0 $PX4_PID 2>/dev/null; then
+            echo "ERROR: PX4 simulation failed to start"
+            cat /tmp/px4_sim.log
+            exit 1
+          fi
+          echo "PX4 simulation started (PID: $PX4_PID)"
+
+          # Give PX4 time to boot up and start publishing
+          echo "Waiting for PX4 to initialize (this may take 30-60 seconds)..."
+          sleep 10
 
       - name: test ros topics
         shell: bash
@@ -223,34 +252,67 @@ jobs:
           source /opt/ros/humble/setup.bash
           source $HOME/workspace/ros2_ws/install/setup.bash
 
-          echo "Available ROS topics:"
-          ros2 topic list || true
+          # Verify processes are still running
+          if ! kill -0 $(cat /tmp/dds_pid.txt) 2>/dev/null; then
+            echo "ERROR: DDS agent is not running"
+            echo "=== DDS Agent Log ==="
+            cat /tmp/dds_agent.log
+            exit 1
+          fi
 
-          timeout 180 bash -c '
-            until ros2 topic list | grep -q /fmu/out/sensor_combined; do
-              sleep 1
+          if ! kill -0 $(cat /tmp/px4_pid.txt) 2>/dev/null; then
+            echo "ERROR: PX4 simulation is not running"
+            echo "=== PX4 Simulation Log ==="
+            tail -n 100 /tmp/px4_sim.log
+            exit 1
+          fi
+
+          echo "Both processes are running, waiting for ROS topics..."
+
+          # Wait up to 90 seconds for the topic to appear
+          if ! timeout 90 bash -c '
+            while ! ros2 topic list | grep -q /fmu/out/sensor_combined; do
+              echo "Waiting for topic /fmu/out/sensor_combined... ($(date +%H:%M:%S))"
+              sleep 5
             done
-          '
+          '; then
+            echo "ERROR: Timeout waiting for /fmu/out/sensor_combined topic"
+            echo ""
+            echo "=== Available ROS 2 Topics ==="
+            ros2 topic list || true
+            echo ""
+            echo "=== Last 100 lines of PX4 Log ==="
+            tail -n 100 /tmp/px4_sim.log
+            echo ""
+            echo "=== Last 50 lines of DDS Agent Log ==="
+            tail -n 50 /tmp/dds_agent.log
+            exit 1
+          fi
 
-          ros2 topic echo /fmu/out/sensor_combined --once || (echo "Failed to echo topic; PX4 log tail:" && tail -n 200 $HOME/logs/px4_gz.log && false)
+          echo "Topic found! Listing all available topics:"
+          ros2 topic list
+
+          echo ""
+          echo "Reading from /fmu/out/sensor_combined:"
+          ros2 topic echo /fmu/out/sensor_combined --once
 
       - name: stop px4 and dds
         if: always()
         run: |
-          set -e || true
+          echo "Stopping PX4 and DDS agent..."
           if [ -f /tmp/px4_pid.txt ]; then
-            kill "$(cat /tmp/px4_pid.txt)" || pkill -f px4 || true
-          else
-            pkill -f px4 || true
+            kill $(cat /tmp/px4_pid.txt) 2>/dev/null || echo "PX4 process already stopped"
+          fi
+          if [ -f /tmp/dds_pid.txt ]; then
+            kill $(cat /tmp/dds_pid.txt) 2>/dev/null || echo "DDS agent process already stopped"
           fi
 
-          if [ -f "$HOME/.microxrce_agent.pid" ]; then
-            kill "$(cat $HOME/.microxrce_agent.pid)" || pkill -f MicroXRCEAgent || true
-          else
-            pkill -f MicroXRCEAgent || true
-          fi
-
-          echo "--- Last PX4 logs ---"
-          tail -n 200 $HOME/logs/px4_gz.log || true
-          echo "--- Last DDS logs ---"
-          tail -n 200 $HOME/logs/microxrce_agent.log || true
+      - name: upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulation-logs
+          path: |
+            /tmp/px4_sim.log
+            /tmp/dds_agent.log
+          retention-days: 5
