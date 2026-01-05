@@ -137,13 +137,44 @@ jobs:
 
           cat > $HOME/scripts/run_dds_agent.sh << 'EOF'
           #!/bin/bash
-          MicroXRCEAgent udp4 -p 8888
+          set -e
+
+          LOG=$HOME/logs/microxrce_agent.log
+          mkdir -p "$(dirname "$LOG")"
+
+          nohup MicroXRCEAgent udp4 -p 8888 > "$LOG" 2>&1 &
+          PID=$!
+          echo $PID > $HOME/.microxrce_agent.pid
+
+          for i in $(seq 1 30); do
+            if kill -0 "$PID" >/dev/null 2>&1 || pgrep -f MicroXRCEAgent >/dev/null; then
+              echo "MicroXRCEAgent started (pid $PID)"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "MicroXRCEAgent failed to start; last 200 lines of log:" >&2
+          tail -n 200 "$LOG" >&2
+          exit 1
           EOF
           chmod +x $HOME/scripts/run_dds_agent.sh
 
           cat > $HOME/scripts/run_simulation.sh << 'EOF'
           #!/bin/bash
           set -e
+
+          LOG=$HOME/logs/px4_gz.log
+          mkdir -p "$(dirname "$LOG")"
+
+          for i in $(seq 1 120); do
+            if pgrep -f MicroXRCEAgent >/dev/null || [ -f "$HOME/.microxrce_agent.pid" ]; then
+              echo "MicroXRCEAgent is running, proceeding"
+              break
+            fi
+            echo "Waiting for MicroXRCEAgent to be ready..."
+            sleep 1
+          done
 
           export PX4_SIM_SPEED_FACTOR=2
           export PX4_GZ_MODEL=x500
@@ -154,7 +185,18 @@ jobs:
           export HEADLESS=1
           cd $HOME/workspace/PX4-Autopilot
           make distclean
-          HEADLESS=1 make px4_sitl gz_x500
+
+          HEADLESS=1 make px4_sitl gz_x500 > "$LOG" 2>&1 &
+          PX4_PID=$!
+          echo $PX4_PID > /tmp/px4_pid.txt
+
+          for i in $(seq 1 60); do
+            if [ -e /tmp/px4_pid.txt ] && kill -0 "$PX4_PID" >/dev/null 2>&1; then
+              echo "PX4 started (pid $PX4_PID)"
+              break
+            fi
+            sleep 1
+          done
           EOF
           chmod +x $HOME/scripts/run_simulation.sh
 
@@ -168,13 +210,12 @@ jobs:
 
       - name: start dds and px4
         run: |
-          $HOME/scripts/run_dds_agent.sh &
-          DDS_PID=$!
-          sleep 2
-          $HOME/scripts/run_simulation.sh &
-          PX4_PID=$!
-          echo $PX4_PID > /tmp/px4_pid.txt
-          echo $DDS_PID > /tmp/dds_pid.txt
+          set -e
+          $HOME/scripts/run_dds_agent.sh || (cat $HOME/logs/microxrce_agent.log && false)
+          $HOME/scripts/run_simulation.sh || (tail -n +1 $HOME/logs/px4_gz.log && false)
+          sleep 5
+          echo "DDS PID: $(cat $HOME/.microxrce_agent.pid || echo 'N/A')"
+          echo "PX4 PID: $(cat /tmp/px4_pid.txt || echo 'N/A')"
 
       - name: test ros topics
         shell: bash
@@ -182,16 +223,34 @@ jobs:
           source /opt/ros/humble/setup.bash
           source $HOME/workspace/ros2_ws/install/setup.bash
 
-          timeout 30 bash -c '
+          echo "Available ROS topics:"
+          ros2 topic list || true
+
+          timeout 180 bash -c '
             until ros2 topic list | grep -q /fmu/out/sensor_combined; do
               sleep 1
             done
           '
 
-          ros2 topic echo /fmu/out/sensor_combined --once
+          ros2 topic echo /fmu/out/sensor_combined --once || (echo "Failed to echo topic; PX4 log tail:" && tail -n 200 $HOME/logs/px4_gz.log && false)
 
       - name: stop px4 and dds
         if: always()
         run: |
-          kill $(cat /tmp/px4_pid.txt) || true
-          kill $(cat /tmp/dds_pid.txt) || true
+          set -e || true
+          if [ -f /tmp/px4_pid.txt ]; then
+            kill "$(cat /tmp/px4_pid.txt)" || pkill -f px4 || true
+          else
+            pkill -f px4 || true
+          fi
+
+          if [ -f "$HOME/.microxrce_agent.pid" ]; then
+            kill "$(cat $HOME/.microxrce_agent.pid)" || pkill -f MicroXRCEAgent || true
+          else
+            pkill -f MicroXRCEAgent || true
+          fi
+
+          echo "--- Last PX4 logs ---"
+          tail -n 200 $HOME/logs/px4_gz.log || true
+          echo "--- Last DDS logs ---"
+          tail -n 200 $HOME/logs/microxrce_agent.log || true
