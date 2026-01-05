@@ -10,7 +10,6 @@ jobs:
     container:
       image: ghcr.io/sloretz/ros:humble-desktop-full
 
-
     steps:
       - name: checkout repo
         uses: actions/checkout@v4
