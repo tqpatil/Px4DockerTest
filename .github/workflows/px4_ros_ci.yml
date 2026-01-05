@@ -8,7 +8,7 @@ jobs:
   px4-ros:
     runs-on: ubuntu-22.04
     container:
-      image: ghcr.io/sloretz/ros:humble-desktop-full
+      image: osrf/ros:humble-desktop-full
 
     steps:
       - name: checkout repo
@@ -211,38 +211,16 @@ jobs:
         run: |
           set -e
 
-          # Start DDS agent with output logging
+          # Start DDS agent
           echo "Starting MicroXRCE-DDS Agent..."
-          $HOME/scripts/run_dds_agent.sh > /tmp/dds_agent.log 2>&1 &
-          DDS_PID=$!
-          echo $DDS_PID > /tmp/dds_pid.txt
+          $HOME/scripts/run_dds_agent.sh
 
-          # Verify DDS agent is running
-          sleep 2
-          if ! kill -0 $DDS_PID 2>/dev/null; then
-            echo "ERROR: DDS agent failed to start"
-            cat /tmp/dds_agent.log
-            exit 1
-          fi
-          echo "DDS agent started (PID: $DDS_PID)"
-
-          # Start PX4 simulation with output logging
+          # Start PX4 simulation
           echo "Starting PX4 SITL simulation..."
-          $HOME/scripts/run_simulation.sh > /tmp/px4_sim.log 2>&1 &
-          PX4_PID=$!
-          echo $PX4_PID > /tmp/px4_pid.txt
-
-          # Verify PX4 is running
-          sleep 2
-          if ! kill -0 $PX4_PID 2>/dev/null; then
-            echo "ERROR: PX4 simulation failed to start"
-            cat /tmp/px4_sim.log
-            exit 1
-          fi
-          echo "PX4 simulation started (PID: $PX4_PID)"
+          $HOME/scripts/run_simulation.sh
 
           # Give PX4 time to boot up and start publishing
-          echo "Waiting for PX4 to initialize (this may take 30-60 seconds)..."
+          echo "Waiting for PX4 to initialize..."
           sleep 10
 
       - name: test ros topics
@@ -252,17 +230,17 @@ jobs:
           source $HOME/workspace/ros2_ws/install/setup.bash
 
           # Verify processes are still running
-          if ! kill -0 $(cat /tmp/dds_pid.txt) 2>/dev/null; then
+          if ! kill -0 $(cat $HOME/.microxrce_agent.pid) 2>/dev/null; then
             echo "ERROR: DDS agent is not running"
             echo "=== DDS Agent Log ==="
-            cat /tmp/dds_agent.log
+            cat $HOME/logs/microxrce_agent.log
             exit 1
           fi
 
           if ! kill -0 $(cat /tmp/px4_pid.txt) 2>/dev/null; then
             echo "ERROR: PX4 simulation is not running"
             echo "=== PX4 Simulation Log ==="
-            tail -n 100 /tmp/px4_sim.log
+            tail -n 100 $HOME/logs/px4_gz.log
             exit 1
           fi
 
@@ -281,10 +259,10 @@ jobs:
             ros2 topic list || true
             echo ""
             echo "=== Last 100 lines of PX4 Log ==="
-            tail -n 100 /tmp/px4_sim.log
+            tail -n 100 $HOME/logs/px4_gz.log
             echo ""
             echo "=== Last 50 lines of DDS Agent Log ==="
-            tail -n 50 /tmp/dds_agent.log
+            tail -n 50 $HOME/logs/microxrce_agent.log
             exit 1
           fi
 
@@ -302,9 +280,14 @@ jobs:
           if [ -f /tmp/px4_pid.txt ]; then
             kill $(cat /tmp/px4_pid.txt) 2>/dev/null || echo "PX4 process already stopped"
           fi
-          if [ -f /tmp/dds_pid.txt ]; then
-            kill $(cat /tmp/dds_pid.txt) 2>/dev/null || echo "DDS agent process already stopped"
+          if [ -f $HOME/.microxrce_agent.pid ]; then
+            kill $(cat $HOME/.microxrce_agent.pid) 2>/dev/null || echo "DDS agent process already stopped"
           fi
+
+          echo "--- Last PX4 logs ---"
+          tail -n 200 $HOME/logs/px4_gz.log || true
+          echo "--- Last DDS logs ---"
+          tail -n 200 $HOME/logs/microxrce_agent.log || true
 
       - name: upload logs on failure
         if: failure()
@@ -312,6 +295,6 @@ jobs:
         with:
           name: simulation-logs
           path: |
-            /tmp/px4_sim.log
-            /tmp/dds_agent.log
+            $HOME/logs/px4_gz.log
+            $HOME/logs/microxrce_agent.log
           retention-days: 5
