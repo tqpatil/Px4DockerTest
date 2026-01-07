@@ -8,7 +8,7 @@ jobs:
   px4-ros:
     runs-on: ubuntu-22.04
     container:
-      image: osrf/ros:humble-desktop-full
+      image: ghcr.io/sloretz/ros:humble-desktop-full
 
     steps:
       - name: checkout repo
@@ -248,12 +248,12 @@ jobs:
 
           # Wait up to 90 seconds for the topic to appear
           if ! timeout 90 bash -c '
-            while ! ros2 topic list | grep -q /fmu/out/sensor_combined; do
-              echo "Waiting for topic /fmu/out/sensor_combined... ($(date +%H:%M:%S))"
+            while ! ros2 topic list | grep -q /fmu/fmu/out/sensor_combined; do
+              echo "Waiting for topic /fmu/fmu/out/sensor_combined... ($(date +%H:%M:%S))"
               sleep 5
             done
           '; then
-            echo "ERROR: Timeout waiting for /fmu/out/sensor_combined topic"
+            echo "ERROR: Timeout waiting for /fmu/fmu/out/sensor_combined topic"
             echo ""
             echo "=== Available ROS 2 Topics ==="
             ros2 topic list || true
@@ -270,8 +270,8 @@ jobs:
           ros2 topic list
 
           echo ""
-          echo "Reading from /fmu/out/sensor_combined:"
-          ros2 topic echo /fmu/out/sensor_combined --once
+          echo "Reading from /fmu/fmu/out/sensor_combined:"
+          ros2 topic echo /fmu/fmu/out/sensor_combined --once
 
       - name: stop px4 and dds
         if: always()
